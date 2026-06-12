@@ -18,6 +18,10 @@ let downloadLockTime = 0;
 let memoryFootprintMB = '0.00';
 let hasLoggedCacheWarning = false;
 let charInvertedIndex = new Map();
+let siteIndex = new Map();
+
+// 预编译港澳台站点标识集合，避免每次匹配时创建临时数组
+const BILIBILI_REGION_SITES = new Set(['bilibili_hk_mo_tw', 'bilibili_hk_mo', 'bilibili_tw']);
 
 // 当前生效的数据源标识 ('custom' | 'official')
 let activeDataSource = 'custom';
@@ -60,6 +64,7 @@ const COLON_SPLIT_REGEX = /[:：]/;
  */
 function buildInvertedIndex(items) {
     const newCharIndex = new Map();
+    const newSiteIndex = new Map();
     const len = items.length;
 
     for (let i = 0; i < len; i++) {
@@ -77,9 +82,23 @@ function buildInvertedIndex(items) {
             }
             idArray.push(i);
         }
+
+        const sites = items[i].sites;
+        if (sites) {
+            for (let j = 0; j < sites.length; j++) {
+                const siteKey = sites[j].site;
+                let arr = newSiteIndex.get(siteKey);
+                if (!arr) {
+                    arr = [];
+                    newSiteIndex.set(siteKey, arr);
+                }
+                arr.push(i);
+            }
+        }
     }
 
     charInvertedIndex = newCharIndex;
+    siteIndex = newSiteIndex;
 }
 
 /**
@@ -512,7 +531,22 @@ export async function searchBangumiData(keyword, siteKeys) {
                 return core.length >= 2 ? core : normalizeSpaces(kw).toLowerCase();
             }).filter(k => k.length > 0);
 
-            let candidateIndices = null; 
+            let candidateIndices = null;
+
+            // 站点索引预筛：将请求站点对应的条目集合预先收集，用于后续与字符索引候选交叉过滤
+            let siteFilterSet = null;
+            if (siteIndex.size > 0) {
+                siteFilterSet = new Set();
+                const siteKeySet = new Set(siteKeys);
+                for (const sk of siteKeySet) {
+                    const arr = siteIndex.get(sk);
+                    if (arr) {
+                        for (let si = 0; si < arr.length; si++) {
+                            siteFilterSet.add(arr[si]);
+                        }
+                    }
+                }
+            }
 
             // 倒排索引初筛逻辑
             if (typeof charInvertedIndex !== 'undefined' && charInvertedIndex.size > 0 && coreKws.length > 0) {
@@ -561,11 +595,15 @@ export async function searchBangumiData(keyword, siteKeys) {
                     }
                 }
                 
-                candidateIndices = Array.from(globalCandidates);
+                candidateIndices = siteFilterSet
+                    ? Array.from(globalCandidates).filter(idx => siteFilterSet.has(idx))
+                    : Array.from(globalCandidates);
             } 
             else {
                 // 索引未就绪时，降级使用全量扫描
-                candidateIndices = memoryCache.items.map((_, i) => i);
+                candidateIndices = siteFilterSet
+                    ? Array.from(siteFilterSet)
+                    : memoryCache.items.map((_, i) => i);
             }
 
             const items = memoryCache.items;
@@ -660,12 +698,13 @@ export async function searchBangumiData(keyword, siteKeys) {
 
     const validDubRegex = VALID_DUB_REGEX;
     const results = [];
+    const siteKeySet = new Set(siteKeys);
 
     // 特定站点分发与区域版本/配音版本构建
     for (const { item, titles } of finalItems) {
         if (!item.sites) continue;
 
-        const matchedSites = item.sites.filter(s => siteKeys.includes(s.site));
+        const matchedSites = item.sites.filter(s => siteKeySet.has(s.site));
         for (const matchedSite of matchedSites) {
             let typeStr = "TV动画"; let typeId = "tvseries";
             if (item.type === 'movie') { typeStr = "剧场版"; typeId = "movie"; }
@@ -674,7 +713,7 @@ export async function searchBangumiData(keyword, siteKeys) {
             else if (item.type === 'web') { typeStr = "WEB动画"; typeId = "web"; }
 
             let baseSuffix = "";
-            if (['bilibili_hk_mo_tw', 'bilibili_hk_mo', 'bilibili_tw'].includes(matchedSite.site)) {
+            if (BILIBILI_REGION_SITES.has(matchedSite.site)) {
                 baseSuffix = "（港澳台）";
             }
 
@@ -745,6 +784,7 @@ export function clearBangumiDataCache(clearDisk = false) {
         memoryCacheTime = 0; // 重置寿命时钟
         queryCache.clear(); // 释放查询缓存
         charInvertedIndex.clear(); // 释放倒排索引内存
+        siteIndex.clear(); // 释放站点索引内存
         const totalMemMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(2);
         log("info", `[Utils] [Bangumi-Data] 内存缓存已主动释放 (原条目数: ${itemCount}，释放: ${memoryFootprintMB} MB，当前项目总占用: ${totalMemMB} MB)`);
         memoryFootprintMB = '0.00'; // 重置探针
